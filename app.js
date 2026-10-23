@@ -143,6 +143,40 @@
     ts(id).at = d;
     S.best = Math.max(S.best || 0, streak());
   }
+  // ---------- Статистика для автора (временно: Google Таблица) ----------
+  const STATS_URL = window.TRAINER_STATS_URL || '';
+  const STATS_KEY = window.TRAINER_STATS_KEY || '';
+  let statsTimer = null;
+  function track(id, event) {
+    if (!STATS_URL) return;
+    const t = id ? TASKS[id] : null, st = id ? peek(id) : {};
+    S.outbox = S.outbox || [];
+    S.outbox.push({
+      ts: Date.now(), event, task: id || '',
+      section: t ? (t.lesson.block === 0 ? 'Вводный курс' : `Блок ${t.lesson.block}. ${BLOCKS[t.lesson.block - 1].title}`) : '',
+      lesson: t ? t.lesson.title : '', level: t ? t.level : '', n: t ? t.n : '',
+      stars: st.stars || 0, hints: st.hints || 0, wrong: st.wrong || 0
+    });
+    if (S.outbox.length > 300) S.outbox = S.outbox.slice(-300);
+    save();
+    clearTimeout(statsTimer);
+    statsTimer = setTimeout(flushStats, 1500);
+  }
+  function flushStats() {
+    if (!STATS_URL || !S.profile || !S.outbox || !S.outbox.length) return;
+    if (!S.uid) { S.uid = 'u' + Math.random().toString(36).slice(2, 10); }
+    const batch = S.outbox.slice(0, 50);
+    const user = tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user : null;
+    const body = JSON.stringify({ key: STATS_KEY, uid: S.uid, name: S.profile.name, grade: S.profile.grade,
+      tg: user ? user.id : '', where: tg ? 'Telegram' : 'браузер', events: batch });
+    try {
+      fetch(STATS_URL, { method: 'POST', mode: 'no-cors', keepalive: true, headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body })
+        .then(() => { S.outbox = S.outbox.slice(batch.length); save(); if (S.outbox.length) statsTimer = setTimeout(flushStats, 1500); })
+        .catch(() => { /* нет сети — отправим позже */ });
+    } catch (e) { /* нет сети */ }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushStats(); });
+
   const totalStars = () => Object.values(S.tasks).reduce((s, x) => s + (x.stars || 0), 0);
   const totalSolved = () => Object.keys(S.tasks).filter(counted).length;
 
@@ -584,7 +618,7 @@
   function openHint(id) {
     const st = ts(id);
     st.hints = (st.hints || 0) + 1; st.ht = Date.now();
-    ui.wait = null; save(); render(false);
+    ui.wait = null; save(); track(id, 'подсказка'); render(false);
   }
 
   // ---------- Нижние панели ----------
@@ -699,12 +733,13 @@
       if (r.empty) { ui.fb[d.id] = { ok: false, text: r.empty }; render(false); return; }
       if (r.ok) {
         st.st = st.shown ? 'review' : 'solved'; st.stars = starsFor(t, st); markActivity(d.id); save();
+        track(d.id, st.st === 'review' ? 'разобрана' : 'решена');
         const praise = ['Верно!', 'Точно!', 'Так и есть!'][hash(d.id) % 3];
         ui.fb[d.id] = { ok: true, text: praise + (st.stars ? ` +${st.stars} ${st.stars === 1 ? 'звезда' : 'звезды'}.` : ' Сверь ход мысли с решением ниже.') };
         haptic('success'); render(false);
         const c = document.getElementById('taskCard'); if (c) c.classList.add('pop');
       } else {
-        st.wrong = (st.wrong || 0) + 1; save();
+        st.wrong = (st.wrong || 0) + 1; save(); track(d.id, 'неверно');
         const more = hasHints(t) ? ' Можно открыть подсказку.' : (t.lesson.block === 0 ? '' : ' Если не выходит — пересмотри лекцию «Основа».');
         ui.fb[d.id] = { ok: false, text: 'Пока не так. Перечитай условие ещё раз.' + more };
         haptic('error'); render(false);
@@ -719,19 +754,19 @@
     hintNow: (d) => openHint(d.id),
     showSol: (d) => {
       const st = ts(d.id); st.shown = true;
-      if (!counted(d.id)) { st.st = 'review'; st.stars = 0; markActivity(d.id); }
+      if (!counted(d.id)) { st.st = 'review'; st.stars = 0; markActivity(d.id); track(d.id, 'разобрана'); }
       save(); ui.fb[d.id] = { ok: true, text: 'Задача разобрана и засчитана без звезды. Похожая задача придёт в повторении.' }; render(false);
     },
     selfOpen: (d) => { ts(d.id).selfOpen = true; save(); render(false); },
-    selfOk: (d) => { const t = TASKS[d.id], st = ts(d.id); st.st = 'solved'; st.stars = starsFor(t, st); markActivity(d.id); save(); ui.fb[d.id] = { ok: true, text: 'Отлично!' + (st.stars ? ` +${st.stars} ${st.stars === 1 ? 'звезда' : 'звезды'}.` : '') }; haptic('success'); render(false); },
-    selfNo: (d) => { const st = ts(d.id); st.st = 'tried'; save(); ui.fb[d.id] = { ok: false, text: 'Ничего страшного: разбери решение, а к этой теме вернёмся в повторении. Можно спросить автора.' }; render(false); },
+    selfOk: (d) => { const t = TASKS[d.id], st = ts(d.id); st.st = 'solved'; st.stars = starsFor(t, st); markActivity(d.id); save(); track(d.id, 'сошлось'); ui.fb[d.id] = { ok: true, text: 'Отлично!' + (st.stars ? ` +${st.stars} ${st.stars === 1 ? 'звезда' : 'звезды'}.` : '') }; haptic('success'); render(false); },
+    selfNo: (d) => { const st = ts(d.id); st.st = 'tried'; save(); track(d.id, 'не сошлось'); ui.fb[d.id] = { ok: false, text: 'Ничего страшного: разбери решение, а к этой теме вернёмся в повторении. Можно спросить автора.' }; render(false); },
     ask: (d) => askSheet(d.id),
     askFromAccess: () => askSheet(null),
     askSend: (d) => {
       const v = document.getElementById('askText').value.trim();
       if (!v) { toast('Напиши, что непонятно.'); return; }
       const title = d.id ? taskTitle(TASKS[d.id]) : 'вопрос автору';
-      S.qs.push({ title, text: v, date: nowDate(), ts: Date.now() }); save();
+      S.qs.push({ title, text: v, date: nowDate(), ts: Date.now() }); save(); track(d.id || null, 'вопрос автору');
       closeSheet();
       if (tg) { toBot(`Вопрос: ${title}\n${v}`, 'Вопрос скопирован. Вставь его в чат с ботом и отправь.'); }
       else toast('Вопрос сохранён. В рабочей версии он сразу придёт автору.');
@@ -744,7 +779,7 @@
       const text = document.getElementById('subText').value.trim();
       if (!photos && !text) { toast('Добавь фото или текст решения.'); return; }
       const title = id ? taskTitle(TASKS[id]) : 'другая работа';
-      S.subs.push({ title, photos, date: nowDate(), ts: Date.now() }); save();
+      S.subs.push({ title, photos, date: nowDate(), ts: Date.now() }); save(); track(id || null, 'решение автору');
       closeSheet();
       if (tg) { toBot(`Решение: ${title}${text ? '\n' + text : ''}`, photos ? 'Подпись скопирована. В чате с ботом прикрепи фото решения и вставь подпись.' : 'Решение скопировано. Вставь его в чат с ботом и отправь.'); }
       else toast('Решение сохранено. В рабочей версии оно уйдёт автору на проверку.');
@@ -808,6 +843,7 @@
 
   stack = [{ screen: 'home' }];
   render(true);
+  setTimeout(flushStats, 2000);
   // Если в облаке Telegram прогресс новее — берём его (например, ребёнок занимался на другом устройстве).
   cloudLoad((remote) => {
     if (remote && (remote.savedAt || 0) > (S.savedAt || 0)) {
